@@ -10,6 +10,7 @@ dotenv.config();
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -21,6 +22,8 @@ import {
 import { z, ZodError } from 'zod';
 import { jsonSchemaToZod } from 'json-schema-to-zod';
 import axios, { type AxiosRequestConfig, type AxiosError } from 'axios';
+import express, { type Request, type Response } from 'express';
+import cors from 'cors';
 
 /**
  * Type definition for JSON objects
@@ -1887,16 +1890,130 @@ async function executeApiTool(
 
 
 /**
- * Main function to start the server
+ * Starts the server in HTTP/SSE mode
  */
-async function main() {
-// Set up stdio transport
+async function startHttpServer() {
+  const app = express();
+  // Support both MCP_PORT (ToolHive) and PORT (manual deployment)
+  const PORT = parseInt(process.env.MCP_PORT || process.env.PORT || '3000', 10);
+  const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS?.split(',') || [];
+
+  // Enable CORS for allowed origins
+  app.use(cors({
+    origin: ALLOWED_ORIGINS.length > 0 ? ALLOWED_ORIGINS : '*',
+    credentials: true
+  }));
+
+  app.use(express.json());
+
+  // Store active SSE connections by session ID
+  const sseTransports = new Map<string, SSEServerTransport>();
+
+  // Health check endpoint
+  app.get('/health', (_req: Request, res: Response) => {
+    res.json({
+      status: 'healthy',
+      server: SERVER_NAME,
+      version: SERVER_VERSION,
+      timestamp: new Date().toISOString()
+    });
+  });
+
+  // SSE endpoint - establishes the event stream
+  app.get('/sse', async (req: Request, res: Response) => {
+    console.error('New SSE connection request');
+
+    const transport = new SSEServerTransport('/message', res, {
+      allowedOrigins: ALLOWED_ORIGINS.length > 0 ? ALLOWED_ORIGINS : undefined
+    });
+
+    // Store transport by session ID
+    sseTransports.set(transport.sessionId, transport);
+
+    // Set up cleanup when connection closes
+    transport.onclose = () => {
+      console.error(`SSE connection closed: ${transport.sessionId}`);
+      sseTransports.delete(transport.sessionId);
+    };
+
+    transport.onerror = (error: Error) => {
+      console.error(`SSE transport error: ${error.message}`);
+      sseTransports.delete(transport.sessionId);
+    };
+
+    try {
+      // Note: server.connect() automatically calls transport.start()
+      await server.connect(transport);
+      console.error(`SSE connection established: ${transport.sessionId}`);
+    } catch (error) {
+      console.error('Error establishing SSE connection:', error);
+      sseTransports.delete(transport.sessionId);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Failed to establish SSE connection' });
+      }
+    }
+  });
+
+  // Message endpoint - receives messages from the client
+  app.post('/message', async (req: Request, res: Response) => {
+    const sessionId = req.query.sessionId as string;
+
+    if (!sessionId) {
+      return res.status(400).json({ error: 'Missing sessionId query parameter' });
+    }
+
+    const transport = sseTransports.get(sessionId);
+    if (!transport) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
+    try {
+      await transport.handlePostMessage(req, res, req.body);
+    } catch (error) {
+      console.error('Error handling POST message:', error);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Failed to process message' });
+      }
+    }
+  });
+
+  // Start HTTP server
+  app.listen(PORT, '0.0.0.0', () => {
+    console.error(`${SERVER_NAME} MCP Server (v${SERVER_VERSION}) running on HTTP`);
+    console.error(`SSE endpoint: http://0.0.0.0:${PORT}/sse`);
+    console.error(`Health check: http://0.0.0.0:${PORT}/health`);
+    console.error(`API base URL: ${API_BASE_URL}`);
+  });
+}
+
+/**
+ * Starts the server in stdio mode
+ */
+async function startStdioServer() {
   try {
     const transport = new StdioServerTransport();
     await server.connect(transport);
     console.error(`${SERVER_NAME} MCP Server (v${SERVER_VERSION}) running on stdio${API_BASE_URL ? `, proxying API at ${API_BASE_URL}` : ''}`);
   } catch (error) {
     console.error("Error during server startup:", error);
+    process.exit(1);
+  }
+}
+
+/**
+ * Main function to start the server
+ */
+async function main() {
+  const transportMode = process.env.MCP_TRANSPORT?.toLowerCase() || 'stdio';
+
+  console.error(`Starting MCP server in ${transportMode} mode...`);
+
+  if (transportMode === 'http' || transportMode === 'sse') {
+    await startHttpServer();
+  } else if (transportMode === 'stdio') {
+    await startStdioServer();
+  } else {
+    console.error(`Unknown transport mode: ${transportMode}. Use 'stdio' or 'http'.`);
     process.exit(1);
   }
 }
