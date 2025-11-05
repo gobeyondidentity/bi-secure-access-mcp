@@ -2,10 +2,12 @@
 
 ## What This MCP Offers
 
-- An MCP server that enables Claude to interact with the Beyond Identity Secure Access API over stdio
+- An MCP server that enables Claude to interact with the Beyond Identity Secure Access API
+- Supports both **stdio** (standard I/O) and **HTTP/SSE** (Server-Sent Events) transport modes
 - Exposes one tool per API operation derived from the OpenAPI spec (97 tools total)
 - Manages resources including tenants, realms, identities, credentials, groups, and related objects
 - All API calls are authorized using a tenant-scoped API token that determines access permissions
+- Docker support for easy deployment and scaling
 
 API Documentation: [https://docs.beyondidentity.com/api/v1](https://docs.beyondidentity.com/api/v1)
 
@@ -33,9 +35,135 @@ From the Beyond Identity Secure Access Admin Console:
 4. Note your `tenant_id` from the URL: `.../tenants/<tenant_id>/realms/<realm_id>`
 5. Note a `realm_id` for testing purposes
 
+## Transport Modes
+
+This MCP server supports two transport modes:
+
+### stdio Mode (Default)
+- Communication via standard input/output
+- Used for Claude CLI integration
+- Best for local development and CLI tools
+- Set `MCP_TRANSPORT=stdio` or leave unset
+
+### HTTP/SSE Mode
+- Communication via Server-Sent Events over HTTP
+- Enables remote access and web-based clients
+- Includes health check endpoint for monitoring
+- Best for containerized deployments and production environments
+- Set `MCP_TRANSPORT=http`
+
+## Docker Deployment
+
+### Quick Start with Docker Compose
+
+1. Clone the repository and navigate to the directory:
+```bash
+cd bi-secure-access-mcp
+```
+
+2. Create a `.env` file with your API token:
+```bash
+cp .env.example .env
+# Edit .env and add your BEARER_TOKEN_BEARERAUTH
+```
+
+3. Start the server:
+```bash
+docker-compose up -d
+```
+
+4. Check the health status:
+```bash
+curl http://localhost:3000/health
+```
+
+### Docker Commands
+
+#### Build the image:
+```bash
+docker build -t bi-secure-access-mcp:latest .
+```
+
+#### Run with environment variables:
+```bash
+docker run -d \
+  --name bi-mcp-server \
+  -p 3000:3000 \
+  -e MCP_TRANSPORT=http \
+  -e BEARER_TOKEN_BEARERAUTH="your_api_token_here" \
+  -e PORT=3000 \
+  bi-secure-access-mcp:latest
+```
+
+#### View logs:
+```bash
+docker logs -f bi-mcp-server
+```
+
+#### Stop and remove:
+```bash
+docker stop bi-mcp-server
+docker rm bi-mcp-server
+```
+
+### Docker Environment Variables
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `BEARER_TOKEN_BEARERAUTH` | Yes | - | Beyond Identity API token |
+| `MCP_TRANSPORT` | No | `stdio` | Transport mode: `stdio` or `http` |
+| `PORT` | No | `3000` | HTTP server port (HTTP mode only) |
+| `ALLOWED_ORIGINS` | No | `*` | Comma-separated CORS origins (HTTP mode only) |
+| `NODE_ENV` | No | `production` | Node environment |
+
+### HTTP/SSE Endpoints
+
+When running in HTTP mode, the following endpoints are available:
+
+- **GET `/health`** - Health check endpoint
+  ```bash
+  curl http://localhost:3000/health
+  ```
+
+- **GET `/sse`** - Establish SSE connection
+  - Returns a session ID for message routing
+  - Maintains an open connection for server-to-client messages
+
+- **POST `/message?sessionId=<id>`** - Send messages to the server
+  - Requires `sessionId` query parameter from SSE connection
+  - Request body contains the MCP protocol message
+
+### Production Deployment
+
+For production deployments, consider:
+
+1. **Use secrets management** for `BEARER_TOKEN_BEARERAUTH`
+2. **Configure ALLOWED_ORIGINS** to restrict CORS access
+3. **Set up reverse proxy** (nginx, traefik) for TLS termination
+4. **Configure resource limits** in docker-compose.yml
+5. **Enable log aggregation** for centralized logging
+6. **Set up monitoring** using the `/health` endpoint
+
+Example with docker-compose and secrets:
+```yaml
+services:
+  bi-mcp-server:
+    image: bi-secure-access-mcp:latest
+    environment:
+      - MCP_TRANSPORT=http
+      - BEARER_TOKEN_BEARERAUTH_FILE=/run/secrets/bi_api_token
+      - ALLOWED_ORIGINS=https://app.example.com
+    secrets:
+      - bi_api_token
+
+secrets:
+  bi_api_token:
+    external: true
+```
+
 ## Configuration
 
-**Note:** This MCP server has only been tested with Claude CLI.
+**Note:** For stdio mode, this MCP server has been tested with Claude CLI.
 
 ### Claude CLI Setup
 
@@ -182,19 +310,54 @@ npm start
 ## Troubleshooting
 
 ### Server Won't Start
+
+**Local (stdio mode):**
 - Verify Node.js version >= 20.0.0
 - Check that `build/index.js` exists (run `npm run build` if not)
 - Ensure all dependencies are installed (`npm install`)
+
+**Docker (HTTP mode):**
+- Check Docker logs: `docker logs bi-mcp-server`
+- Verify the image built successfully: `docker images | grep bi-secure-access-mcp`
+- Ensure port 3000 is not already in use: `lsof -i :3000` (macOS/Linux)
+- Check container status: `docker ps -a | grep bi-mcp-server`
 
 ### Authentication Failures
 - Verify your API token is valid and not expired
 - Check that the token has necessary scopes for the operations
 - Ensure the `BEARER_TOKEN_BEARERAUTH` environment variable is set correctly
+- For Docker: Verify the environment variable is passed: `docker inspect bi-mcp-server | grep BEARER_TOKEN`
 
 ### Connection Issues
+
+**API Connection:**
 - Verify network connectivity to `https://api-us.beyondidentity.com`
 - Check firewall settings for outbound HTTPS traffic
 - For EU tenants, the API endpoint will differ
+
+**HTTP/SSE Mode:**
+- Test health endpoint: `curl http://localhost:3000/health`
+- Check if port is exposed: `docker port bi-mcp-server` (Docker)
+- Verify CORS settings if connecting from browser
+- Check network connectivity: `docker network ls` (Docker)
+
+### Docker-Specific Issues
+
+**Container keeps restarting:**
+- Check logs for errors: `docker logs bi-mcp-server`
+- Verify environment variables are set correctly
+- Ensure API token is valid
+- Check health check status: `docker inspect --format='{{.State.Health.Status}}' bi-mcp-server`
+
+**Health check failing:**
+- Verify the server started: `docker logs bi-mcp-server | grep "running on HTTP"`
+- Check if curl is available in container: `docker exec bi-mcp-server curl --version`
+- Test health endpoint manually: `docker exec bi-mcp-server curl -f http://localhost:3000/health`
+
+**Build failures:**
+- Clear Docker cache: `docker builder prune`
+- Check for TypeScript errors: `npm run typecheck` locally
+- Verify all files are present (check .dockerignore)
 
 ## Support
 

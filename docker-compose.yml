@@ -1,0 +1,74 @@
+version: '3.8'
+
+services:
+  bi-mcp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: bi-secure-access-mcp:latest
+    container_name: bi-mcp-server
+    restart: unless-stopped
+
+    # Port mapping
+    ports:
+      - "3000:3000"
+
+    # Environment variables
+    environment:
+      # Transport mode: 'http' for SSE, 'stdio' for standard input/output
+      - MCP_TRANSPORT=http
+
+      # Server port (default: 3000)
+      - PORT=3000
+
+      # Beyond Identity API token (REQUIRED)
+      # Replace with your actual token or use .env file
+      - BEARER_TOKEN_BEARERAUTH=${BEARER_TOKEN_BEARERAUTH}
+
+      # Optional: Comma-separated list of allowed origins for CORS
+      # Example: https://app.example.com,https://admin.example.com
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-}
+
+      # Node environment
+      - NODE_ENV=production
+
+    # Health check configuration
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+
+    # Resource limits (optional, adjust as needed)
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # Security options
+    security_opt:
+      - no-new-privileges:true
+
+    # Read-only root filesystem (optional, uncomment if needed)
+    # read_only: true
+
+    # Temporary filesystem for runtime data
+    tmpfs:
+      - /tmp
+
+# Optional: Create a dedicated network
+networks:
+  default:
+    name: bi-mcp-network
